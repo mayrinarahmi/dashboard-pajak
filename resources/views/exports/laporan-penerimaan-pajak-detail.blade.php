@@ -1,8 +1,8 @@
+<!-- resources/views/exports/laporan-penerimaan-pajak-summary.blade.php -->
 <!DOCTYPE html>
 <html lang="id">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
     <title>{{ $judulLaporan }}</title>
     <style>
         body {
@@ -156,6 +156,28 @@
                                     <td class="text-right">{{ number_format(($subchild['bulan'][7] ?? 0) + ($subchild['bulan'][8] ?? 0) + ($subchild['bulan'][9] ?? 0), 0, ',', '.') }}</td>
                                     <td class="text-right">{{ number_format(($subchild['bulan'][10] ?? 0) + ($subchild['bulan'][11] ?? 0) + ($subchild['bulan'][12] ?? 0), 0, ',', '.') }}</td>
                                 </tr>
+                                
+                                @if(isset($subchild['children']) && !empty($subchild['children']))
+                                    @foreach($subchild['children'] as $grandchild)
+                                        @php
+                                            $grandchildIndent = $grandchild['depth'];
+                                            $grandchildPaddingLeft = $grandchildIndent * 5;
+                                        @endphp
+                                        
+                                        <tr>
+                                            <td>{{ $grandchild['kode'] }}</td>
+                                            <td style="padding-left: {{ $grandchildPaddingLeft }}px;">{{ $grandchild['uraian'] }}</td>
+                                            <td class="text-right">{{ number_format($grandchild['persentase_penerimaan'], 2, ',', '.') }}%</td>
+                                            <td class="text-right">{{ number_format($grandchild['pagu_anggaran'], 0, ',', '.') }}</td>
+                                            <td class="text-right">{{ number_format($grandchild['nilai_target'], 0, ',', '.') }}</td>
+                                            <td class="text-right">{{ number_format($grandchild['total_penerimaan'], 0, ',', '.') }}</td>
+                                            <td class="text-right">{{ number_format(($grandchild['bulan'][1] ?? 0) + ($grandchild['bulan'][2] ?? 0) + ($grandchild['bulan'][3] ?? 0), 0, ',', '.') }}</td>
+                                            <td class="text-right">{{ number_format(($grandchild['bulan'][4] ?? 0) + ($grandchild['bulan'][5] ?? 0) + ($grandchild['bulan'][6] ?? 0), 0, ',', '.') }}</td>
+                                            <td class="text-right">{{ number_format(($grandchild['bulan'][7] ?? 0) + ($grandchild['bulan'][8] ?? 0) + ($grandchild['bulan'][9] ?? 0), 0, ',', '.') }}</td>
+                                            <td class="text-right">{{ number_format(($grandchild['bulan'][10] ?? 0) + ($grandchild['bulan'][11] ?? 0) + ($grandchild['bulan'][12] ?? 0), 0, ',', '.') }}</td>
+                                        </tr>
+                                    @endforeach
+                                @endif
                             @endforeach
                         @endif
                     @endforeach

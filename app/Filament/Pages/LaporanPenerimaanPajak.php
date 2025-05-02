@@ -4,8 +4,7 @@ namespace App\Filament\Pages;
 
 use App\Models\KodeRekening;
 use App\Models\TahunAnggaran;
-use App\Models\TargetPajak;
-use App\Models\PenerimaanPajak;
+use App\Models\Penerimaan;
 use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Concerns\InteractsWithForms;
@@ -17,7 +16,9 @@ use Filament\Support\Exceptions\Halt;
 use Illuminate\Support\Collection;
 use Illuminate\Contracts\View\View;
 use Barryvdh\DomPDF\Facade\Pdf;
-use Carbon\Carbon;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Log;
 
 class LaporanPenerimaanPajak extends Page implements HasForms
 {
@@ -116,19 +117,35 @@ class LaporanPenerimaanPajak extends Page implements HasForms
             
             $tahunAnggaran = TahunAnggaran::findOrFail($data['tahun_anggaran_id']);
             
+            // Log proses untuk debugging
+            Log::info('Memulai generateReport', [
+                'tahun_anggaran' => $tahunAnggaran->tahun,
+                'tanggal_mulai' => $tanggalMulai->format('Y-m-d'),
+                'tanggal_akhir' => $tanggalAkhir->format('Y-m-d')
+            ]);
+            
             $this->reportData = $this->getReportData($tahunAnggaran, $tanggalMulai, $tanggalAkhir);
             $this->tanggalLaporan = $dateRange['label'];
             $this->judulLaporan = "Realisasi Penerimaan Pajak Daerah " . $dateRange['label'];
+            
+            // Log hasil untuk debugging
+            Log::info('Hasil generateReport', [
+                'judul' => $this->judulLaporan,
+                'data_count' => $this->reportData ? $this->reportData->count() : 0
+            ]);
             
             Notification::make()
                 ->title('Laporan berhasil dibuat')
                 ->success()
                 ->send();
-        } catch (Halt $exception) {
+        } catch (\Exception $e) {
+            Log::error('Error pada generateReport: ' . $e->getMessage());
+            Log::error($e->getTraceAsString());
+            
             Notification::make()
                 ->title('Terjadi kesalahan')
                 ->danger()
-                ->body($exception->getMessage())
+                ->body($e->getMessage())
                 ->send();
         }
     }
@@ -190,7 +207,7 @@ class LaporanPenerimaanPajak extends Page implements HasForms
                 ];
                 
             default:
-                return [
+               return [
                     'tanggal_mulai' => Carbon::now()->startOfMonth(),
                     'tanggal_akhir' => Carbon::now(),
                     'label' => 'Periode Default'
@@ -202,67 +219,72 @@ class LaporanPenerimaanPajak extends Page implements HasForms
     {
         $result = collect();
         
-        // Ambil semua kode rekening level 1 (parent)
-        $rootNodes = KodeRekening::where('level', 1)
-            ->orderBy('kode')
-            ->get();
-        
-        foreach ($rootNodes as $node) {
-            $nodeData = $this->processNode($node, $tahunAnggaran, $tanggalMulai, $tanggalAkhir);
-            $result->push($nodeData);
+        try {
+            // Ambil semua kode rekening level 1 (parent)
+            $rootNodes = KodeRekening::where('level', 1)
+                ->where('tahun_anggaran_id', $tahunAnggaran->id)
+                ->orderBy('kode')
+                ->get();
+            
+            Log::info('Root nodes', ['count' => $rootNodes->count()]);
+            
+            foreach ($rootNodes as $node) {
+                $nodeData = $this->processNode($node, $tahunAnggaran, $tanggalMulai, $tanggalAkhir);
+                $result->push($nodeData);
+            }
+            
+            return $result;
+        } catch (\Exception $e) {
+            Log::error('Error pada getReportData: ' . $e->getMessage());
+            Log::error($e->getTraceAsString());
+            throw $e;
         }
-        
-        return $result;
     }
     
     private function processNode(KodeRekening $node, TahunAnggaran $tahunAnggaran, $tanggalMulai, $tanggalAkhir, $depth = 0): array
     {
-        // Data dasar
-        $nodeData = [
-            'id' => $node->id,
-            'kode' => $node->kode,
-            'uraian' => $node->uraian,
-            'is_pajak' => $node->is_pajak,
-            'level' => $node->level,
-            'depth' => $depth,
-            'has_children' => $node->children->isNotEmpty(),
-            'pagu_anggaran' => 0,
-            'target_percentage' => 0,
-            'nilai_target' => 0,
-            'total_penerimaan' => 0,
-            'kurang_target' => 0,
-            'persentase_penerimaan' => 0,
-            'bulan' => [],
-            'children' => []
-        ];
-        
-        // Jika ini adalah jenis pajak (level 4)
-        if ($node->is_pajak) {
-            $targetPajak = TargetPajak::where('kode_rekening_id', $node->id)
-                ->where('tahun_anggaran_id', $tahunAnggaran->id)
-                ->first();
-                
-            if ($targetPajak) {
-                // Hitung bulan dari tanggal laporan untuk target
-                $currentMonth = Carbon::now()->month;
-                $targetPercentage = $tahunAnggaran->getTargetKumulatifSampai($currentMonth);
-                
-                $nodeData['pagu_anggaran'] = $targetPajak->pagu_anggaran;
-                $nodeData['target_percentage'] = $targetPercentage;
-                $nodeData['nilai_target'] = ($targetPajak->pagu_anggaran * $targetPercentage) / 100;
-                
+        try {
+            // Data dasar
+            $nodeData = [
+                'id' => $node->id,
+                'kode' => $node->kode,
+                'uraian' => $node->nama,
+                'is_pajak' => $node->level == 4, // Pajak adalah level 4 
+                'level' => $node->level,
+                'depth' => $depth,
+                'has_children' => $node->children->isNotEmpty(),
+                'pagu_anggaran' => $node->target,
+                'target_percentage' => 0,
+                'nilai_target' => 0,
+                'total_penerimaan' => 0,
+                'kurang_target' => 0,
+                'persentase_penerimaan' => 0,
+                'bulan' => [],
+                'children' => []
+            ];
+            
+            // Hitung target kumulatif sampai bulan saat ini
+            $currentMonth = Carbon::now()->month;
+            $targetPercentage = 100; // Default ke 100%
+            
+            // Ubah nilai target berdasarkan persentase
+            $nodeData['target_percentage'] = $targetPercentage;
+            $nodeData['nilai_target'] = ($nodeData['pagu_anggaran'] * $targetPercentage) / 100;
+            
+            // Jika ini adalah jenis pajak (level 4)
+            if ($node->level == 4) {
                 // Hitung penerimaan dalam rentang tanggal
-                $penerimaan = PenerimaanPajak::where('target_pajak_id', $targetPajak->id)
-                    ->whereBetween('tanggal_penerimaan', [$tanggalMulai, $tanggalAkhir])
-                    ->sum('nilai_penerimaan');
+                $penerimaan = Penerimaan::where('kode_rekening_id', $node->id)
+                    ->whereBetween('tanggal_penerimaan', [$tanggalMulai->format('Y-m-d'), $tanggalAkhir->format('Y-m-d')])
+                    ->sum('jumlah');
                     
                 $nodeData['total_penerimaan'] = $penerimaan;
                 $nodeData['kurang_target'] = $nodeData['nilai_target'] - $penerimaan;
-                $nodeData['persentase_penerimaan'] = $targetPajak->pagu_anggaran > 0 
-                    ? ($penerimaan / $targetPajak->pagu_anggaran) * 100 
+                $nodeData['persentase_penerimaan'] = $nodeData['pagu_anggaran'] > 0 
+                    ? ($penerimaan / $nodeData['pagu_anggaran']) * 100 
                     : 0;
                 
-                // Hitung penerimaan per bulan jika diperlukan untuk tampilan detail
+                // Hitung penerimaan per bulan
                 $bulanData = [];
                 for ($i = 1; $i <= 12; $i++) {
                     $year = $tahunAnggaran->tahun;
@@ -276,12 +298,12 @@ class LaporanPenerimaanPajak extends Page implements HasForms
                                       $tanggalAkhir->between($startDate, $endDate)));
                                         
                     if ($includeBulan) {
-                        $penerimaanBulan = PenerimaanPajak::where('target_pajak_id', $targetPajak->id)
+                        $penerimaanBulan = Penerimaan::where('kode_rekening_id', $node->id)
                             ->whereBetween('tanggal_penerimaan', [
-                                max($startDate, $tanggalMulai), 
-                                min($endDate, $tanggalAkhir)
+                                max($startDate->format('Y-m-d'), $tanggalMulai->format('Y-m-d')), 
+                                min($endDate->format('Y-m-d'), $tanggalAkhir->format('Y-m-d'))
                             ])
-                            ->sum('nilai_penerimaan');
+                            ->sum('jumlah');
                             
                         $bulanData[$i] = $penerimaanBulan;
                     } else {
@@ -289,73 +311,142 @@ class LaporanPenerimaanPajak extends Page implements HasForms
                     }
                 }
                 $nodeData['bulan'] = $bulanData;
-            }
-        } else {
-            // Proses anak-anak node
-            if ($node->children->isNotEmpty()) {
-                $childrenData = collect();
-                
-                foreach ($node->children()->orderBy('kode')->get() as $child) {
-                    $childData = $this->processNode($child, $tahunAnggaran, $tanggalMulai, $tanggalAkhir, $depth + 1);
-                    $childrenData->push($childData);
+            } else {
+                // Proses anak-anak node
+                if ($node->children->isNotEmpty()) {
+                    $childrenData = collect();
                     
-                    // Akumulasi nilai ke parent
-                    $nodeData['pagu_anggaran'] += $childData['pagu_anggaran'];
-                    $nodeData['nilai_target'] += $childData['nilai_target'];
-                    $nodeData['total_penerimaan'] += $childData['total_penerimaan'];
-                    
-                    // Akumulasi nilai per bulan
-                    foreach ($childData['bulan'] as $bulan => $nilai) {
-                        if (!isset($nodeData['bulan'][$bulan])) {
-                            $nodeData['bulan'][$bulan] = 0;
+                    foreach ($node->children()->orderBy('kode')->get() as $child) {
+                        $childData = $this->processNode($child, $tahunAnggaran, $tanggalMulai, $tanggalAkhir, $depth + 1);
+                        $childrenData->push($childData);
+                        
+                        // Akumulasi nilai ke parent
+                        $nodeData['pagu_anggaran'] += $childData['pagu_anggaran'];
+                        $nodeData['nilai_target'] += $childData['nilai_target'];
+                        $nodeData['total_penerimaan'] += $childData['total_penerimaan'];
+                        
+                        // Akumulasi nilai per bulan
+                        foreach ($childData['bulan'] as $bulan => $nilai) {
+                            if (!isset($nodeData['bulan'][$bulan])) {
+                                $nodeData['bulan'][$bulan] = 0;
+                            }
+                            $nodeData['bulan'][$bulan] += $nilai;
                         }
-                        $nodeData['bulan'][$bulan] += $nilai;
                     }
+                    
+                    $nodeData['children'] = $childrenData->toArray();
+                    $nodeData['kurang_target'] = $nodeData['nilai_target'] - $nodeData['total_penerimaan'];
+                    $nodeData['persentase_penerimaan'] = $nodeData['pagu_anggaran'] > 0 
+                        ? ($nodeData['total_penerimaan'] / $nodeData['pagu_anggaran']) * 100 
+                        : 0;
                 }
-                
-                $nodeData['children'] = $childrenData;
-                $nodeData['kurang_target'] = $nodeData['nilai_target'] - $nodeData['total_penerimaan'];
-                $nodeData['persentase_penerimaan'] = $nodeData['pagu_anggaran'] > 0 
-                    ? ($nodeData['total_penerimaan'] / $nodeData['pagu_anggaran']) * 100 
-                    : 0;
             }
+            
+            return $nodeData;
+        } catch (\Exception $e) {
+            Log::error('Error pada processNode: ' . $e->getMessage());
+            Log::error($e->getTraceAsString());
+            throw $e;
         }
-        
-        return $nodeData;
     }
     
     public function exportPDF()
     {
-        if (!$this->reportData) {
+        try {
+            if (!$this->reportData) {
+                Notification::make()
+                    ->title('Silahkan generate laporan terlebih dahulu')
+                    ->warning()
+                    ->send();
+                return null;
+            }
+            
+            $formState = $this->form->getState();
+            $tahunAnggaran = TahunAnggaran::find($formState['tahun_anggaran_id']);
+            
+            $data = [
+                'reportData' => $this->reportData,
+                'tanggalLaporan' => $this->tanggalLaporan,
+                'judulLaporan' => $this->judulLaporan,
+                'tahun' => $tahunAnggaran ? $tahunAnggaran->tahun : date('Y'),
+                'showDetailedView' => $this->showDetailedView,
+                'tanggalCetak' => Carbon::now()->format('d-m-Y H:i:s')
+            ];
+            
+            Log::info('Memulai export PDF', [
+                'reportData_count' => $this->reportData ? count($this->reportData) : 0,
+                'tanggalLaporan' => $this->tanggalLaporan,
+                'judulLaporan' => $this->judulLaporan,
+            ]);
+            
+            // Debug data untuk keperluan troubleshooting
+            $this->debugPdfData($data);
+            
+            // Tentukan view berdasarkan detail view
+            $view = $this->showDetailedView 
+                ? 'exports.laporan-penerimaan-pajak-detail'
+                : 'exports.laporan-penerimaan-pajak-summary';
+            
+            // Buat PDF secara manual dan simpan ke file
+            $outputDir = storage_path('app/public/pdf');
+            if (!file_exists($outputDir)) {
+                mkdir($outputDir, 0755, true);
+            }
+            
+            $outputPath = $outputDir . '/laporan-penerimaan-pajak.pdf';
+            
+            // Load file, simpan ke PDF, lalu kembalikan response download
+            $pdf = PDF::loadView($view, $data);
+            $pdf->setPaper('a3', 'landscape');
+            $pdf->save($outputPath);
+            
+            Log::info('PDF berhasil dibuat', ['path' => $outputPath]);
+            
+            return response()->download($outputPath, 'laporan-penerimaan-pajak.pdf', [
+                'Content-Type' => 'application/pdf'
+            ])->deleteFileAfterSend();
+        } catch (\Exception $e) {
+            Log::error('Error pada exportPDF: ' . $e->getMessage());
+            Log::error($e->getTraceAsString());
+            
             Notification::make()
-                ->title('Silahkan generate laporan terlebih dahulu')
-                ->warning()
+                ->title('Gagal membuat PDF')
+                ->danger()
+                ->body($e->getMessage())
                 ->send();
-            return;
+                
+            return null;
         }
-        
-        $data = [
-            'reportData' => $this->reportData,
-            'tanggalLaporan' => $this->tanggalLaporan,
-            'judulLaporan' => $this->judulLaporan,
-            'tahun' => TahunAnggaran::find($this->form->getState()['tahun_anggaran_id'])->tahun,
-            'showDetailedView' => $this->showDetailedView
-        ];
-        
-        $view = $this->showDetailedView 
-            ? 'exports.laporan-penerimaan-pajak-detail'
-            : 'exports.laporan-penerimaan-pajak-summary';
-        
-        $pdf = PDF::loadView($view, $data);
-        $pdf->setPaper('a3', 'landscape');
-        
-        $filename = $this->showDetailedView 
-            ? 'laporan-penerimaan-pajak-detail.pdf'
-            : 'laporan-penerimaan-pajak-summary.pdf';
-        
-        return response()->streamDownload(function () use ($pdf) {
-            echo $pdf->output();
-        }, $filename);
+    }
+    
+    // Method untuk debug data PDF
+    private function debugPdfData($data)
+    {
+        try {
+            // Simpan sample data (tanpa reportData yang besar) ke log
+            $sampleData = array_merge($data, [
+                'reportData' => 'Data too large, removed for logging',
+                'reportData_count' => count($data['reportData'] ?? []),
+                'sample_item' => count($data['reportData'] ?? []) > 0 ? $data['reportData'][0] : null
+            ]);
+            
+            Log::info('PDF Data', $sampleData);
+            
+            // Simpan data ke file untuk debugging eksternal
+            $debugData = array_merge($data, [
+                'reportData' => json_decode(json_encode($data['reportData'] ?? []), true)
+            ]);
+            
+            file_put_contents(
+                storage_path('app/pdf-debug.json'), 
+                json_encode($debugData, JSON_PRETTY_PRINT)
+            );
+            
+            return true;
+        } catch (\Exception $e) {
+            Log::error('Debug data error: ' . $e->getMessage());
+            return false;
+        }
     }
     
     public function getTargetPercentageLabel(): string
@@ -368,9 +459,6 @@ class LaporanPenerimaanPajak extends Page implements HasForms
             return "Target 0%";
         }
         
-        $tahunAnggaran = TahunAnggaran::find($tahunAnggaranId);
-        $kumulatifTarget = $tahunAnggaran->getTargetKumulatifSampai($currentMonth);
-        
         $namaBulan = [
             1 => 'Januari', 2 => 'Februari', 3 => 'Maret',
             4 => 'April', 5 => 'Mei', 6 => 'Juni',
@@ -378,7 +466,7 @@ class LaporanPenerimaanPajak extends Page implements HasForms
             10 => 'Oktober', 11 => 'November', 12 => 'Desember'
         ];
         
-        return "Target {$kumulatifTarget}% (s/d {$namaBulan[$currentMonth]})";
+        return "Target 100% (s/d {$namaBulan[$currentMonth]})";
     }
     
     public function render(): View
