@@ -1,4 +1,28 @@
 <x-filament-panels::page>
+
+    <style>
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        .text-right {
+            text-align: right;
+        }
+        .indent-1 { padding-left: 20px; }
+        .indent-2 { padding-left: 40px; }
+        .indent-3 { padding-left: 60px; }
+        .level-1 { font-weight: bold; }
+    </style>
     <x-filament::section>
         <form wire:submit.prevent="generateReport">
             {{ $this->form }}
